@@ -1,0 +1,641 @@
+#include "server.h"
+#include "ui_server.h"
+// 消息队列
+QQueue<QTcpSocket*> MsgQueue;
+
+Thread::Thread() {
+    qDebug() << "current thread id :" << QThread::currentThreadId();
+}
+
+Thread::~Thread(){
+
+}
+
+//通过id找name
+QString Thread::getName(QString id) {
+    QSqlQuery query;
+    QString cmd = tr("select Name from info where ID = '%1';").arg(id);
+    query.exec(cmd);
+    query.next();
+    return query.value(0).toString();
+}
+
+//获取时间戳
+QString Thread::getTime() {
+    QString str = QDateTime::currentDateTime().toString("yy-MM-dd hh:mm:ss");
+    return str;
+}
+
+void Thread::processMsg(QTcpSocket *s,const QByteArray data) {
+    // 协议对象，用于解析数据
+    Protocol pro;
+    qDebug() << qDebug_Chinese("收到客户端信息");
+    //contains 检测指定字符段
+    // 如果是注册信息
+    if(data.contains("<register>")) {
+        QByteArray temp = data;
+        QString chatnum,passwd,name,gender,null;
+        // 调用协议解析函数
+        pro.parseData(temp,chatnum,passwd,name,gender,null);
+        qDebug()<<"chatnum: "<< chatnum <<"passwd: "<< passwd <<"name: "<< name <<"gender: "<< gender;
+        // 数据比对
+        QSqlQuery query;
+        // 试着查找这个注册用户的信息
+        QString cmd = tr("select * from user_info where chatnum = '%1' ").arg(chatnum);
+        // 如果是已经存在的用户信息，就发送不要重复注册，如果是新用户，就添加到用户信息表里面，发送注册
+        if(query.exec(cmd)) {
+            // 如果有当前的chatnum，表示重复注册
+            if(query.next()) {
+                qDebug()<< qDebug_Chinese("重复注册");
+                QString head = "<register-have>";
+                QByteArray res;
+                res.append(pro.packData(head));
+                s->write(res);
+                return;
+            } else {
+                //插入数据库 user_info，进行注册
+                query.clear();
+                QString cmd = tr("insert into user_info values('%1','%2','%3','%4');").arg(chatnum).arg(passwd).arg(name).arg(gender);
+                if(query.exec(cmd)) {
+                    //注册成功
+                    qDebug()<< qDebug_Chinese("注册成功。。");
+                    QString head = "<register-succ>";
+                    QByteArray res;
+                    res.append(pro.packData(head));
+                    s->write(res);
+                } else {
+                    // 注册失败
+                    qDebug()<< qDebug_Chinese("注册失败。。");
+                    QString head = "<register-error>";
+                    QByteArray res;
+                    res.append(pro.packData(head));
+                    s->write(res);
+                }
+            }
+        }else {
+            // sql出错
+            qDebug()<< qDebug_Chinese("注册失败。。");
+            QString head = "<register-error>";
+            QByteArray res;
+            res.append(pro.packData(head));
+            s->write(res);
+        }
+        return;
+    // 如果是登陆信息
+    }
+    /*
+    else if(data.contains("<login>")) {
+        //登录数据
+        QByteArray temp = data;
+        QString chatnum, passwd, null;
+        // 拿到登陆的用户，及输入的密码等
+        pro.parseData(temp, chatnum, passwd, null, null, null);
+        qDebug()<<"chatnum:"<< chatnum<< "passwd:"<< passwd;
+        // 信息验证
+        QSqlQuery query;
+        // 从数据库中拿到登陆用户的注册密码
+        QString cmd = tr("select password from user_info where chatnum = '%1';").arg(chatnum);
+        if(query.exec(cmd)) {
+            // 如果有这个用户，进行数据匹配
+            if(query.next()) {
+                if(query.value(0).toString() == passwd) {
+                    //避免重复登录
+                    if(hash.contains(hash.key(chatnum))) {
+                        //重复登录
+                        s->write("<login-have>");
+                        return;
+                    }
+                    //登录成功
+                    QByteArray str;
+                    str.append(pro.packData("<login-succ>"));
+                    s->write(str);
+
+                    //往hash中插入数据,记录socket-chatnum
+                    hash.insert(s,chatnum);
+                    //1.获取所有在线信息，反馈给当前用户
+                    QByteArray namelist;
+                    namelist.append("<namelist-all>");
+                    namelist.append("$");
+                    for(auto it=hash.begin();it!=hash.end();it++)
+                    {
+                        //打包信息
+                        namelist.append(getName(it.value()));
+                        namelist.append("(");
+                        namelist.append(it.value());
+                        namelist.append(")");
+                        namelist.append("$");
+                    }
+                    //发送给自己
+                    s->write(namelist);
+                    //发送给其他人当前信息
+                    QByteArray nameid;
+                    nameid.append("<nameid-y>");
+                    nameid.append(getName(chatnum));
+                    nameid.append("(");
+                    nameid.append(chatnum);
+                    nameid.append(")");
+                    nameid.append("$");
+                    for(auto it=hash.begin();it!=hash.end();it++)
+                    {
+                        if(it.key()!=s)
+                            it.key()->write(nameid);
+                    }
+                    //显示在线人数
+                    //ui->onlineLabel->setText(QString::number(hash.size()));
+                    //显示时间戳
+                    //ui->textEdit->append(getTime());
+                    //显示某个人上线信息
+                    //ui->textEdit->append(getName(hash.value(s))+"上线");
+                } else {
+                    //登录失败
+                    QByteArray str;
+                    str.append(pro.packData("<login-fail>"));
+                    s->write(str);
+                }
+            } else {
+                // 没有这个用户，发送用户不存在
+                QByteArray str;
+                str.append(pro.packData("<login-nothave>"));
+                s->write(str);
+            }
+        }
+    return;
+    }else if(data.contains("<wechat>")) //群聊数据
+    {
+        QByteArray temp = data;
+        QString name,time,text,null;
+        //解包
+        pro.parseData(temp,time,text,null,null,null);
+        name = getName(hash.value(s));
+        //打包
+        QByteArray str;
+        str.append(pro.packData("<wechar-all>",name,time,text));
+        //群发,遍历hash表
+        for(auto it=hash.begin();it!=hash.end();it++)
+        {
+            if(it.key()!= s)
+                it.key()->write(str);
+        }
+    return;
+    }else if(data.contains("<onechat>")) //私聊数据
+    {
+        QByteArray temp = data;
+        //解析
+        QString tarID,time,text,null;
+        pro.parseData(temp,tarID,time,text,null,null);
+        //转发
+        //获取该条信息是谁发来的
+        QString srcInfo = getName(hash.value(s))+"("+hash.value(s)+")";
+        //打包信息
+        QString str = pro.packData("<onecahr-one>",srcInfo,time,text);
+        if(hash.key(tarID) == NULL)//如果没有对应ID
+        {
+            return;
+        }
+        //发送
+        hash.key(tarID)->write(str.toUtf8());
+    }
+    */
+    return;
+}
+
+
+// 从消息队列侦听，如果有消息就拿出来进行处理
+void Thread::processPendingTcpData() {
+    qDebug() << "process thread id :" << QThread::currentThreadId();
+    // 字符数组，也可以看做字符串
+    QByteArray data;
+    if (!MsgQueue.isEmpty()) {
+        // 创建一个Tcp的socket用来装客户端信息
+        //QTcpSocket *s(MsgQueue.dequeue());
+        QTcpSocket *s = MsgQueue.dequeue();
+        // 只要这个socket中还有可获得的数据（按字节数算）
+        while(s->bytesAvailable()) {
+            //
+            data.append(s->readAll());
+        }
+
+        qDebug() << "soket msg test!!!!!!!!!!!!!!!";
+        // 处理信息
+        // processMsg(s,data);
+        QString head = "<register-have>";
+        QByteArray res;
+        Protocol pro;
+        res.append(pro.packData(head));
+        s->write(res);
+        qDebug() << "processMsg over??????????????";
+    }
+}
+
+// ===============================================
+
+Server::Server(QWidget *parent) :
+    QWidget(parent), ui(new Ui::Server) {
+
+    ui->setupUi(this);
+    server = NULL;
+    socketprocessthread = NULL;
+    workthread = NULL;
+    initServer();
+    initSql();
+}
+
+Server::~Server() {
+    delete ui;
+}
+
+// 这里应该开多线程来跑
+// 线程一:接收socket，发送socket
+// 线程二:处理socket的信息，进行数据库操作
+
+//初始化服务器侦听
+void Server::initServer() {
+    // 创建消息执行线程
+    socketprocessthread = new QThread;
+    workthread = new Thread();
+    // 官方历程，如果不绑定这个槽函数，就会发生内存泄漏
+    connect(socketprocessthread, &QThread::finished, socketprocessthread, &QObject::deleteLater);
+    connect(socketprocessthread, &QThread::finished, workthread, &QObject::deleteLater);
+    // 线程通信
+    connect(this,SIGNAL(intoMsgQueueOK()),workthread,SLOT(processPendingTcpData()));
+    workthread->moveToThread(socketprocessthread);
+    socketprocessthread->start();
+
+
+    // 把当前对象转换为一个TcpServer对象
+    server = new QTcpServer(this);
+    // 监听任何IPv4的发到10086端口的连接
+    server->listen(QHostAddress::AnyIPv4,10086);
+    // QTcpServer对象，只要发现有新的连接就会发出newConnection()信号
+    connect(server,SIGNAL(newConnection()),this,SLOT(connectSlot()));
+}
+
+//初始化数据库
+void Server::initSql() {
+    QSqlDatabase db=QSqlDatabase::addDatabase("QMYSQL");
+    //连接数据库主机名，这里需要注意（若填的为”127.0.0.1“，出现不能连接，则改为localhost)
+    db.setHostName("127.0.0.1");
+    //连接数据库端口号，与设置一致
+    db.setPort(3306);
+    //连接数据库名，与设置一致
+    db.setDatabaseName("webchatdata");
+    //数据库用户名，与设置一致
+    db.setUserName("root");
+    //数据库密码，与设置一致
+    db.setPassword("123456789");
+    db.open();
+    if(!db.open()) {
+        qDebug()<<"不能连接"<<"connect to mysql error"<< db.lastError().text();
+        return ;
+    } else {
+         qDebug()<<"连接成功"<<"connect to mysql OK";
+         // 创建数据库表结构
+         CreateUserInfoTable();
+    }
+
+}
+
+// 建立用户信息表，好友列表，组群表，服务器状态表
+void Server::CreateUserInfoTable()
+{
+    //构造对象
+    QSqlQuery query;
+    // 创建前先查询，首先查看是否存在这三个表
+    QString find_userinfo_cmd = "select t.table_name from information_schema.TABLES t \
+                        where t.TABLE_SCHEMA = \"webchatdata\" \
+                        and t.TABLE_NAME =\"user_info\";";
+    QString find_friend_cmd = "select t.table_name from information_schema.TABLES t \
+                        where t.TABLE_SCHEMA = \"webchatdata\" \
+                        and t.TABLE_NAME =\"friend\";";
+    QString find_groupinfo_cmd = "select t.table_name from information_schema.TABLES t \
+                        where t.TABLE_SCHEMA = \"webchatdata\" \
+                        and t.TABLE_NAME =\"group_info\";";
+    // user_info表
+    if (query.exec(find_userinfo_cmd)) {
+        // 如果user_info表存在，就不新建
+        if (query.next()){
+            qDebug() << "user_info table exited";
+        } else {
+            //准备SQL命令
+            QString cmd = " CREATE TABLE `webchatdata`.`user_info` (\
+                      `chatnum` INT NOT NULL,\
+                      `password` VARCHAR(45) NOT NULL,\
+                      `name` VARCHAR(45) NULL,\
+                      `gender` VARCHAR(45) NULL,\
+                      PRIMARY KEY (`chatnum`));";
+            if(query.exec(cmd)) {
+                qDebug()<<"create user_info table success";
+            } else {
+                qDebug()<<"create fail";
+            }
+        }
+    }
+    query.clear();
+    if (query.exec(find_friend_cmd)) {
+        // 如果表存在，就不新建
+        if (query.next()){
+            qDebug() << "friend table exited";
+        } else {
+            //准备SQL命令
+            QString cmd = "CREATE TABLE `webchatdata`.`friend` (\
+                    `id_my` INT NOT NULL,\
+                    `id_friend` INT NOT NULL,\
+                    PRIMARY KEY (`id_my`, `id_friend`));";
+            if(query.exec(cmd)) {
+                qDebug()<<"create friend table success";
+            } else {
+                qDebug()<<"create fail";
+            }
+        }
+    }
+    query.clear();
+    if (query.exec(find_groupinfo_cmd)) {
+        // 如果表存在，就不新建
+        if (query.next()){
+            qDebug() << "groupinfo table exited";
+        } else {
+            //准备SQL命令
+            QString cmd = "CREATE TABLE `webchatdata`.`group_info` (\
+                    `group_id` INT NOT NULL,\
+                    `owner` INT NOT NULL,\
+                    `group_name` VARCHAR(45) NULL,\
+                    `describe` VARCHAR(100) NULL,\
+                    `icon` VARCHAR(45) NULL,\
+                    PRIMARY KEY (`group_id`));";
+            if(query.exec(cmd)) {
+                qDebug()<<"create group_info table success";
+            } else {
+                qDebug()<<"create fail";
+            }
+        }
+    }
+    // Server端状态表建立，当前还没建立
+
+}
+
+// 处理客户端发送的数据
+void Server::processClientData(QTcpSocket *s, const QByteArray data) {
+    // 协议对象，用于解析数据
+    Protocol pro;
+    qDebug() << qDebug_Chinese("收到客户端信息");
+    //contains 检测指定字符段
+    // 如果是注册信息
+    if(data.contains("<register>")) {
+        QByteArray temp = data;
+        QString chatnum,passwd,name,gender,null;
+        // 调用协议解析函数
+        pro.parseData(temp,chatnum,passwd,name,gender,null);
+        qDebug()<<"chatnum: "<< chatnum <<"passwd: "<< passwd <<"name: "<< name <<"gender: "<< gender;
+        // 数据比对
+        QSqlQuery query;
+        // 试着查找这个注册用户的信息
+        QString cmd = tr("select * from user_info where chatnum = '%1' ").arg(chatnum);
+        // 如果是已经存在的用户信息，就发送不要重复注册，如果是新用户，就添加到用户信息表里面，发送注册
+        if(query.exec(cmd)) {
+            // 如果有当前的chatnum，表示重复注册
+            if(query.next()) {
+                qDebug()<<"重复注册";
+                QString head = "<register-have>";
+                QByteArray res;
+                res.append(pro.packData(head));
+                s->write(res);
+            } else {
+                // 新注册
+                /*
+                //query.value(1) 第2行的数据为name
+                if(query.value(1).toString() == name && \
+                   query.value(3).toString() == gender) {
+                 */
+                //插入数据库 user_info，进行注册
+                query.clear();
+                QString cmd = tr("insert into user_info values('%1','%2','%3','%4');").arg(chatnum).arg(passwd).arg(name).arg(gender);
+                if(query.exec(cmd)) {
+                    //注册成功
+                    qDebug()<<"注册成功。。";
+                    QString head = "<register-succ>";
+                    QByteArray res;
+                    res.append(pro.packData(head));
+                    s->write(res);
+                } else {
+                    // 注册失败
+                    qDebug()<<"注册失败。。";
+                    QString head = "<register-error>";
+                    QByteArray res;
+                    res.append(pro.packData(head));
+                    s->write(res);
+                }
+            }
+        }else {
+            // sql出错
+            qDebug()<<"注册失败。。";
+            QString head = "<register-error>";
+            QByteArray res;
+            res.append(pro.packData(head));
+            s->write(res);
+        }
+    // 如果是登陆信息
+    } else if(data.contains("<login>")) {
+        //登录数据
+        QByteArray temp = data;
+        QString chatnum, passwd, null;
+        // 拿到登陆的用户，及输入的密码等
+        pro.parseData(temp, chatnum, passwd, null, null, null);
+        qDebug()<<"chatnum:"<< chatnum<< "passwd:"<< passwd;
+        // 信息验证
+        QSqlQuery query;
+        // 从数据库中拿到登陆用户的注册密码
+        QString cmd = tr("select password from user_info where chatnum = '%1';").arg(chatnum);
+        if(query.exec(cmd)) {
+            // 如果有这个用户，进行数据匹配
+            if(query.next()) {
+                if(query.value(0).toString() == passwd) {
+                    //避免重复登录
+                    if(hash.contains(hash.key(chatnum))) {
+                        //重复登录
+                        s->write("<login-have>");
+                        return;
+                    }
+                    //登录成功
+                    QByteArray str;
+                    str.append(pro.packData("<login-succ>"));
+                    s->write(str);
+
+                    //往hash中插入数据,记录socket-chatnum
+                    hash.insert(s,chatnum);
+                    //1.获取所有在线信息，反馈给当前用户
+                    QByteArray namelist;
+                    namelist.append("<namelist-all>");
+                    namelist.append("$");
+                    for(auto it=hash.begin();it!=hash.end();it++)
+                    {
+                        //打包信息
+                        namelist.append(getName(it.value()));
+                        namelist.append("(");
+                        namelist.append(it.value());
+                        namelist.append(")");
+                        namelist.append("$");
+                    }
+                    //发送给自己
+                    s->write(namelist);
+                    //发送给其他人当前信息
+                    QByteArray nameid;
+                    nameid.append("<nameid-y>");
+                    nameid.append(getName(chatnum));
+                    nameid.append("(");
+                    nameid.append(chatnum);
+                    nameid.append(")");
+                    nameid.append("$");
+                    for(auto it=hash.begin();it!=hash.end();it++)
+                    {
+                        if(it.key()!=s)
+                            it.key()->write(nameid);
+                    }
+                    //显示在线人数
+                    ui->onlineLabel->setText(QString::number(hash.size()));
+                    //显示时间戳
+                    ui->textEdit->append(getTime());
+                    //显示某个人上线信息
+                    ui->textEdit->append(getName(hash.value(s))+"上线");
+                } else {
+                    //登录失败
+                    QByteArray str;
+                    str.append(pro.packData("<login-fail>"));
+                    s->write(str);
+                }
+            } else {
+                // 没有这个用户，发送用户不存在
+                QByteArray str;
+                str.append(pro.packData("<login-nothave>"));
+                s->write(str);
+            }
+        }
+    }else if(data.contains("<wechat>")) //群聊数据
+    {
+        QByteArray temp = data;
+        QString name,time,text,null;
+        //解包
+        pro.parseData(temp,time,text,null,null,null);
+        name = getName(hash.value(s));
+        //打包
+        QByteArray str;
+        str.append(pro.packData("<wechar-all>",name,time,text));
+        //群发,遍历hash表
+        for(auto it=hash.begin();it!=hash.end();it++)
+        {
+            if(it.key()!= s)
+                it.key()->write(str);
+        }
+    }else if(data.contains("<onechat>")) //私聊数据
+    {
+        QByteArray temp = data;
+        //解析
+        QString tarID,time,text,null;
+        pro.parseData(temp,tarID,time,text,null,null);
+        //转发
+        //获取该条信息是谁发来的
+        QString srcInfo = getName(hash.value(s))+"("+hash.value(s)+")";
+        //打包信息
+        QString str = pro.packData("<onecahr-one>",srcInfo,time,text);
+        if(hash.key(tarID) == NULL)//如果没有对应ID
+        {
+            return;
+        }
+        //发送
+        hash.key(tarID)->write(str.toUtf8());
+    }
+}
+
+//通过id找name
+QString Server::getName(QString id)
+{
+    QSqlQuery query;
+    QString cmd = tr("select Name from info where ID = '%1';").arg(id);
+    query.exec(cmd);
+    query.next();
+    return query.value(0).toString();
+}
+
+//获取时间戳
+QString Server::getTime()
+{
+    QString str = QDateTime::currentDateTime().toString("yy-MM-dd hh:mm:ss");
+    return str;
+}
+
+void Server::msgIntoQueue(){
+    // 创建一个Tcp的socket用来装客户端信息
+    QTcpSocket *s = (QTcpSocket*)sender();
+    // socket入队
+    MsgQueue.enqueue(s);
+    qDebug() << "msg into queue is OK!!";
+    // 给子线程发消息，消息入队了
+    emit intoMsgQueueOK();
+}
+
+//有新客户端连接
+void Server::connectSlot() {
+    // 获取已经建立连接的子套接字，相当于就是刚刚接收到的客户端的套接字
+    QTcpSocket *socket = server->nextPendingConnection();
+    qDebug() << socket;
+    //将新的套接字添加到服务器的连接链表
+    list.append(socket);
+    // 得到连接socket的ip地址，这里可能会出现同一个IP地址建立两个连接的情况，
+    // 因为同一台主机可以运行两个客户端程序
+    // 所以应该是以用户为准，用户是唯一的
+    QString ip = socket->peerAddress().toString();
+    // 显示ip客户端上线信息
+    ui->textEdit->append("["+ip+"]"+" 上线");
+    // 只要接收到新的socket都会发出readyRead()这个信号
+    // 客户端发消息（TCPsocket）
+    //connect(socket,SIGNAL(readyRead()),this,SLOT(processPendingTcpData()));
+    connect(socket,SIGNAL(readyRead()),this,SLOT(msgIntoQueue()));
+    // 客户端下线
+    connect(socket,SIGNAL(disconnected()),this,SLOT(disconnectSlot()));
+}
+
+/*
+//读取客户端数据
+void Server::processPendingTcpData() {
+    // 字符数组，也可以看做字符串
+    QByteArray data;
+    // 创建一个Tcp的socket用来装客户端信息
+    QTcpSocket *s = (QTcpSocket*)sender();
+    // 只要这个socket中还有可获得的数据（按字节数算）
+    while(s->bytesAvailable()) {
+        //
+        data.append(s->readAll());
+    }
+
+    // 处理信息
+    processClientData(s,data);
+}
+*/
+
+//释放客户端下线资源(list)
+void Server::disconnectSlot() {
+    //获取触发信号的对象
+    QTcpSocket* s = (QTcpSocket*)sender();
+    //删除指定对象
+    list.removeOne(s);
+    //显示某个人下线信息
+    ui->textEdit->append(getName(hash.value(s))+"下线");
+    //删除hash表中对应的内容
+    hash.remove(s);
+    //告诉其他客户端自己下线了
+    QByteArray removeName;
+    removeName.append("<removeName-one>");
+    removeName.append("$");
+    removeName.append(getName(hash.value(s)));
+    removeName.append("(");
+    removeName.append(hash.value(s));
+    removeName.append(")");
+    removeName.append("$");
+    for(auto it=hash.begin();it!=hash.end();it++)
+    {
+        it.key()->write(removeName);
+    }
+
+    //显示在线人数
+    ui->onlineLabel->setText(QString::number(hash.size()));
+
+}
